@@ -159,6 +159,83 @@ class ServiceIdentifier:
             logger.warning("Unexpected error probing %s: %s", target, e)
             return None
 
+    def _score_response(
+        self, response: requests.Response, profile_key: str
+    ) -> tuple[float, bool, list[str]]:
+        """Score a response against a single profile.
+
+        Returns (score, matched_mime, matched_signature_patterns).
+        Score formula (max 10 pts):
+          3 pts — HTTP status 2xx/3xx
+          2 pts — Content-Type matches profile's expected MIME
+          3 pts — Body signatures matched (partial credit: hits/total × 3)
+          2 pts — Spec URL found in body resolves to this profile
+        """
+        profile = self.profiles.get(profile_key, {})
+        if not profile:
+            return 0.0, False, []
+
+        score = 0.0
+        matched_sigs: list[str] = []
+
+        # 3 pts — HTTP status 2xx/3xx
+        if 200 <= response.status_code < 400:
+            score += 3.0
+
+        # 2 pts — MIME type match
+        probe_cfg = profile.get("probe", {})
+        expected_mime_raw: str = probe_cfg.get("accept", "")
+        response_ct: str = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        expected_mimes = [m.strip().lower() for m in expected_mime_raw.split(",") if m.strip()]
+        matched_mime = bool(expected_mimes and response_ct in expected_mimes)
+        if matched_mime:
+            score += 2.0
+
+        # 3 pts — body signatures (partial credit)
+        body_text = response.text[:50000] if response.text else ""
+        body_lower = body_text.lower()
+        validation_cfg = profile.get("validation", {})
+        body_sigs = validation_cfg.get("body_signatures", [])
+        if body_sigs:
+            hits = 0
+            for sig in body_sigs:
+                pattern = sig.get("pattern", "")
+                mode = sig.get("mode", "substring")
+                if mode == "regex":
+                    if re.search(pattern, body_text, re.IGNORECASE):
+                        hits += 1
+                        matched_sigs.append(pattern)
+                else:
+                    if pattern.lower() in body_lower:
+                        hits += 1
+                        matched_sigs.append(pattern)
+            score += (hits / len(body_sigs)) * 3.0
+
+        # 2 pts — spec URL in body resolves to this profile
+        for spec_url, resolved_key in self._spec_url_index.items():
+            if spec_url.lower() in body_lower:
+                if resolved_key == profile_key:
+                    score += 2.0
+                    break
+
+        return round(min(score, 10.0), 2), matched_mime, matched_sigs
+
+    def _score_against_candidates(
+        self, response: requests.Response, candidates: list[str]
+    ) -> list[tuple[str, float, bool, list[str]]]:
+        """Score initial response against all candidate profiles.
+
+        Returns list of (profile_key, score, matched_mime, matched_sigs) sorted descending,
+        filtered to scores >= low_threshold.
+        """
+        results = []
+        for key in candidates:
+            score, matched_mime, matched_sigs = self._score_response(response, key)
+            if score >= self.low_threshold:
+                results.append((key, score, matched_mime, matched_sigs))
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results
+
     def _identify_ftp(self, url: str) -> IdentificationResult:
         """Identify FTP endpoints using ftplib anonymous login."""
         import ftplib
