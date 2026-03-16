@@ -236,6 +236,56 @@ class ServiceIdentifier:
         results.sort(key=lambda x: x[1], reverse=True)
         return results
 
+    def _probe_one_profile(
+        self, url: str, profile_key: str
+    ) -> tuple[str, float, bool, list[str]]:
+        """Fire targeted probe for one profile. Returns (key, score, matched_mime, matched_sigs).
+
+        If the probe fails (network error, timeout), score is 0.0 — not the shortlist score.
+        This prevents a timed-out probe from being promoted by the initial score.
+        """
+        profile = self.profiles.get(profile_key, {})
+        probe_cfg = profile.get("probe", {})
+        suffix = probe_cfg.get("suffix", None)
+        method = probe_cfg.get("method") or "GET"
+
+        resp = self._probe(url, suffix=suffix, method=method)
+        if resp is None:
+            # Probe failed — score 0.0 rather than inheriting the shortlist score
+            logger.debug("Targeted probe failed for profile %s, scoring 0.0", profile_key)
+            return profile_key, 0.0, False, []
+
+        score, matched_mime, matched_sigs = self._score_response(resp, profile_key)
+        return profile_key, score, matched_mime, matched_sigs
+
+    def _run_targeted_probes(
+        self,
+        url: str,
+        shortlist: list[tuple[str, float, bool, list[str]]],
+    ) -> list[tuple[str, float, bool, list[str]]]:
+        """Run targeted probes for all shortlisted profiles in parallel.
+
+        Returns list of (profile_key, score, matched_mime, matched_sigs).
+        Failed probes are included with score 0.0.
+        """
+        results: list[tuple[str, float, bool, list[str]]] = []
+        futures = {}
+
+        with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
+            for key, _, _, _ in shortlist:
+                future = executor.submit(self._probe_one_profile, url, key)
+                futures[future] = key
+
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    logger.warning("Targeted probe for %s raised unexpected error: %s", key, e)
+                    results.append((key, 0.0, False, []))
+
+        return results
+
     def _identify_ftp(self, url: str) -> IdentificationResult:
         """Identify FTP endpoints using ftplib anonymous login."""
         import ftplib
