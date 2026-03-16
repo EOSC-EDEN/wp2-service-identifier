@@ -123,8 +123,14 @@ class ServiceIdentifier:
 
         candidates = self._prefilter_by_url_pattern(url)
 
-        # Stages 2-5 not yet implemented
-        raise NotImplementedError("Stages 2-5 not yet implemented")
+        # Stage 2 — initial probe
+        initial_response = self._probe(url, suffix=None)
+        if initial_response is None:
+            return IdentificationResult(url=url, error="unreachable",
+                                        note="Could not connect to endpoint")
+
+        # Stages 3-5 not yet implemented
+        raise NotImplementedError("Stages 3-5 not yet implemented")
 
     def _prefilter_by_url_pattern(self, url: str) -> list[str]:
         """Return list of profile keys to probe. Returns all supported profiles.
@@ -136,6 +142,22 @@ class ServiceIdentifier:
             key for key, profile in self.profiles.items()
             if not profile.get("special", {}).get("unsupported", False)
         ]
+
+    def _probe(self, url: str, suffix: Optional[str], method: str = "GET") -> Optional[requests.Response]:
+        """Fire a single HTTP request using the shared session. Returns Response or None on error."""
+        target = url + suffix if suffix else url
+        try:
+            if method.upper() == "POST":
+                resp = self._session.post(target, timeout=self.request_timeout, allow_redirects=True)
+            else:
+                resp = self._session.get(target, timeout=self.request_timeout, allow_redirects=True)
+            return resp
+        except requests.exceptions.RequestException as e:
+            logger.warning("Probe failed for %s: %s", target, e)
+            return None
+        except Exception as e:
+            logger.warning("Unexpected error probing %s: %s", target, e)
+            return None
 
     def _identify_ftp(self, url: str) -> IdentificationResult:
         """Identify FTP endpoints using ftplib anonymous login."""
