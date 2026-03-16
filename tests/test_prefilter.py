@@ -19,3 +19,16 @@ def test_candidate_match_fields():
     assert c.score == 8.5
     assert c.matched_mime is True
     assert c.matched_body_signatures == ["<oai-pmh"]
+
+
+from Identifier import ServiceIdentifier
+
+def test_profiles_load():
+    si = ServiceIdentifier()
+    assert len(si.profiles) > 0
+
+def test_profiles_have_required_keys():
+    si = ServiceIdentifier()
+    for key, profile in si.profiles.items():
+        assert "probe" in profile, f"{key} missing 'probe'"
+        assert "validation" in profile, f"{key} missing 'validation'"
