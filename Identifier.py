@@ -106,4 +106,48 @@ class ServiceIdentifier:
         return index
 
     def identify_url(self, url: str) -> IdentificationResult:
-        raise NotImplementedError("Pipeline not yet implemented")
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+
+        # Stage 1 — scheme shortcuts (no HTTP probing needed)
+        if scheme in self._SCHEME_SHORTCUTS:
+            stype = self._SCHEME_SHORTCUTS[scheme]
+            return IdentificationResult(url=url, identified_type=stype, confidence=10.0)
+
+        if scheme == "ftp":
+            return self._identify_ftp(url)
+
+        if scheme not in self._SUPPORTED_SCHEMES:
+            return IdentificationResult(url=url, error="unsupported_scheme",
+                                        note=f"Scheme '{scheme}' cannot be probed")
+
+        candidates = self._prefilter_by_url_pattern(url)
+
+        # Stages 2-5 not yet implemented
+        raise NotImplementedError("Stages 2-5 not yet implemented")
+
+    def _prefilter_by_url_pattern(self, url: str) -> list[str]:
+        """Return list of profile keys to probe. Returns all supported profiles.
+
+        This is the extension point for future URL-pattern-based narrowing.
+        Profiles marked 'unsupported' (AMQP stub, MQTT stub, etc.) are excluded.
+        """
+        return [
+            key for key, profile in self.profiles.items()
+            if not profile.get("special", {}).get("unsupported", False)
+        ]
+
+    def _identify_ftp(self, url: str) -> IdentificationResult:
+        """Identify FTP endpoints using ftplib anonymous login."""
+        import ftplib
+        parsed = urlparse(url)
+        try:
+            ftp = ftplib.FTP(timeout=self.request_timeout)
+            ftp.connect(parsed.hostname, parsed.port or 21)
+            ftp.login()
+            ftp.quit()
+            return IdentificationResult(url=url, identified_type="FTP", confidence=10.0,
+                                        status_code=226)
+        except ftplib.all_errors as e:
+            return IdentificationResult(url=url, identified_type=None,
+                                        error="ftp_error", note=str(e))
