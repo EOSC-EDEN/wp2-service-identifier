@@ -286,6 +286,81 @@ class ServiceIdentifier:
 
         return results
 
+    def _rank_and_emit(
+        self,
+        url: str,
+        scored: list[tuple[str, float, bool, list[str]]],
+        initial_response: Optional[requests.Response] = None,
+        winning_probe_url: Optional[str] = None,
+    ) -> IdentificationResult:
+        """Apply thresholds and build the final IdentificationResult."""
+        if not scored:
+            return IdentificationResult(
+                url=url,
+                identified_type=None,
+                note="No profile matched with sufficient confidence",
+            )
+
+        # Sort descending by score
+        scored_sorted = sorted(scored, key=lambda x: x[1], reverse=True)
+        best_key, best_score, best_mime, best_sigs = scored_sorted[0]
+
+        # Build runners-up (exclude the winner, cap at max_runners_up)
+        runners_up = [
+            CandidateMatch(
+                service_type=key,
+                score=score,
+                matched_mime=matched_mime,
+                matched_body_signatures=sigs,
+            )
+            for key, score, matched_mime, sigs in scored_sorted[1: self.max_runners_up + 1]
+        ]
+
+        # Null result if below minimum confidence
+        if best_score < self.min_confidence:
+            return IdentificationResult(
+                url=url,
+                identified_type=None,
+                confidence=best_score,
+                runners_up=runners_up,
+                note=f"No profile matched with sufficient confidence (best: {best_key} @ {best_score})",
+            )
+
+        # Ambiguity check — top two candidates within ambiguity_gap
+        ambiguous = False
+        if len(scored_sorted) >= 2:
+            second_score = scored_sorted[1][1]
+            if (best_score - second_score) < self.ambiguity_gap:
+                ambiguous = True
+
+        note = None
+        if ambiguous:
+            note = (f"Top candidates are within {self.ambiguity_gap} score points "
+                    f"— manual review recommended")
+
+        # Response metadata from the initial probe
+        final_url = initial_response.url if initial_response else None
+        had_redirect = bool(initial_response and initial_response.history)
+        status_code = initial_response.status_code if initial_response else None
+        content_type = (
+            initial_response.headers.get("Content-Type", "").split(";")[0].strip()
+            if initial_response else None
+        )
+
+        return IdentificationResult(
+            url=url,
+            identified_type=best_key,
+            confidence=best_score,
+            ambiguous=ambiguous,
+            runners_up=runners_up,
+            final_url=final_url,
+            had_redirect=had_redirect,
+            probed_url=winning_probe_url,
+            status_code=status_code,
+            content_type=content_type,
+            note=note,
+        )
+
     def _identify_ftp(self, url: str) -> IdentificationResult:
         """Identify FTP endpoints using ftplib anonymous login."""
         import ftplib

@@ -75,3 +75,61 @@ def test_shortlist_excludes_below_threshold():
     shortlist = si._score_against_candidates(resp, candidates)
     # 404 gives 0 status points → no profile should cross the threshold
     assert all(score >= si.low_threshold for _, score, _, _ in shortlist)
+
+
+from Identifier import CandidateMatch
+
+def test_rank_returns_best_match():
+    si = ServiceIdentifier()
+    scores = [
+        ("OAI-PMH", 8.5, True, ["<oai-pmh"]),
+        ("OAI-Static", 4.1, True, ["<oai-pmh"]),
+        ("SPARQL", 1.2, False, []),
+    ]
+    result = si._rank_and_emit("https://example.com", scores)
+    assert result.identified_type == "OAI-PMH"
+    assert result.confidence == 8.5
+    assert result.ambiguous is False
+
+def test_rank_null_result_below_min_confidence():
+    si = ServiceIdentifier()
+    scores = [("OAI-PMH", 2.0, False, []), ("SPARQL", 1.5, False, [])]
+    result = si._rank_and_emit("https://example.com", scores)
+    assert result.identified_type is None
+    assert result.note is not None
+
+def test_rank_ambiguous_when_top_two_close():
+    si = ServiceIdentifier()
+    scores = [
+        ("SPARQL", 6.2, True, []),
+        ("OGC-CSW", 5.8, False, []),
+    ]
+    result = si._rank_and_emit("https://example.com", scores)
+    assert result.ambiguous is True
+    assert result.identified_type == "SPARQL"  # still returns best guess
+
+def test_rank_runners_up_capped():
+    si = ServiceIdentifier(max_runners_up=2)
+    scores = [
+        ("OAI-PMH", 8.0, True, []),
+        ("SPARQL", 5.0, False, []),
+        ("REST", 4.0, False, []),
+        ("OGC-WMS", 3.5, False, []),
+    ]
+    result = si._rank_and_emit("https://example.com", scores)
+    assert len(result.runners_up) == 2
+
+def test_rank_runners_up_have_correct_matched_mime():
+    si = ServiceIdentifier()
+    scores = [
+        ("OAI-PMH", 8.0, True, ["<oai-pmh"]),
+        ("SPARQL", 5.0, False, []),
+    ]
+    result = si._rank_and_emit("https://example.com", scores)
+    assert result.runners_up[0].service_type == "SPARQL"
+    assert result.runners_up[0].matched_mime is False
+
+def test_rank_empty_scores_returns_null():
+    si = ServiceIdentifier()
+    result = si._rank_and_emit("https://example.com", [])
+    assert result.identified_type is None
