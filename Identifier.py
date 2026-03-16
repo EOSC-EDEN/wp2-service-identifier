@@ -413,7 +413,7 @@ class ServiceIdentifier:
             ftp.login()
             ftp.quit()
             return IdentificationResult(url=url, identified_type="FTP", confidence=10.0,
-                                        status_code=226)
+                                        status_code=230)
         except ftplib.all_errors as e:
             return IdentificationResult(url=url, identified_type=None,
                                         error="ftp_error", note=str(e))

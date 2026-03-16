@@ -20,6 +20,9 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Default instance — reused across requests with default parameters
+_default_identifier = ServiceIdentifier()
+
 
 @app.get("/identify")
 def identify(
@@ -28,11 +31,15 @@ def identify(
     ambiguity_gap: float = Query(1.0, description="Score gap below which result is flagged ambiguous"),
     max_runners_up: int = Query(3, description="Max runner-up candidates to return"),
 ) -> dict:
-    identifier = ServiceIdentifier(
-        min_confidence=min_confidence,
-        ambiguity_gap=ambiguity_gap,
-        max_runners_up=max_runners_up,
-    )
+    # Reuse default instance when params match defaults; create new instance otherwise
+    if (min_confidence == 3.0 and ambiguity_gap == 1.0 and max_runners_up == 3):
+        identifier = _default_identifier
+    else:
+        identifier = ServiceIdentifier(
+            min_confidence=min_confidence,
+            ambiguity_gap=ambiguity_gap,
+            max_runners_up=max_runners_up,
+        )
     result = identifier.identify_url(url)
     return dataclasses.asdict(result)
 
