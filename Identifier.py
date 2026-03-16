@@ -129,8 +129,44 @@ class ServiceIdentifier:
             return IdentificationResult(url=url, error="unreachable",
                                         note="Could not connect to endpoint")
 
-        # Stages 3-5 not yet implemented
-        raise NotImplementedError("Stages 3-5 not yet implemented")
+        # HTML classification — short-circuit before expensive targeted probes
+        body_text = (initial_response.text or "")[:50000]
+        body_lower = body_text.lower()
+
+        if self._is_decommissioned(body_lower):
+            return IdentificationResult(url=url, identified_type=None,
+                                        note="Decommissioned or migrated service detected")
+
+        if self._is_doc_page(body_lower):
+            return IdentificationResult(url=url, identified_type=None,
+                                        note="Documentation page detected, not a live service endpoint")
+
+        # Stage 3 — shortlist: score initial response against all candidates
+        shortlist = self._score_against_candidates(initial_response, candidates)
+
+        if not shortlist:
+            return IdentificationResult(url=url, identified_type=None,
+                                        note="No profile scored above threshold on initial probe")
+
+        # Stage 4 — targeted probes (parallel)
+        final_scores = self._run_targeted_probes(url, shortlist)
+
+        # Determine winning probe URL (suffix used for the best-scoring profile)
+        winning_probe_url = None
+        if final_scores:
+            sorted_finals = sorted(final_scores, key=lambda x: x[1], reverse=True)
+            best_key = sorted_finals[0][0]
+            best_profile = self.profiles.get(best_key, {})
+            suffix = best_profile.get("probe", {}).get("suffix")
+            if suffix:
+                winning_probe_url = url + suffix
+
+        # Stage 5 — rank and emit
+        return self._rank_and_emit(
+            url, final_scores,
+            initial_response=initial_response,
+            winning_probe_url=winning_probe_url,
+        )
 
     def _prefilter_by_url_pattern(self, url: str) -> list[str]:
         """Return list of profile keys to probe. Returns all supported profiles.
@@ -142,6 +178,12 @@ class ServiceIdentifier:
             key for key, profile in self.profiles.items()
             if not profile.get("special", {}).get("unsupported", False)
         ]
+
+    def _is_decommissioned(self, body_lower: str) -> bool:
+        return any(kw.lower() in body_lower for kw in self._decommissioned_keywords)
+
+    def _is_doc_page(self, body_lower: str) -> bool:
+        return any(kw.lower() in body_lower for kw in self._api_doc_keywords)
 
     def _probe(self, url: str, suffix: Optional[str], method: str = "GET") -> Optional[requests.Response]:
         """Fire a single HTTP request using the shared session. Returns Response or None on error."""

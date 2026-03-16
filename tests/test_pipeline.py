@@ -90,3 +90,54 @@ def test_targeted_probes_tolerates_timeout():
     oai_result = next((r for r in results if r[0] == "OAI-PMH"), None)
     assert oai_result is not None
     assert oai_result[1] == 0.0
+
+
+def test_full_pipeline_identifies_oai_pmh():
+    si = ServiceIdentifier()
+    oai_body = "<OAI-PMH xmlns='http://www.openarchives.org/OAI/2.0/'><Identify/></OAI-PMH>"
+    mock_resp = _make_response(200, "text/xml", oai_body)
+
+    with patch.object(si._session, "get", return_value=mock_resp):
+        result = si.identify_url("https://example.com/oai")
+
+    assert result.identified_type == "OAI-PMH"
+    assert result.confidence >= 5.0
+    assert result.error is None
+
+
+def test_full_pipeline_returns_null_on_unreachable():
+    si = ServiceIdentifier()
+    with patch.object(si._session, "get", side_effect=requests.exceptions.ConnectionError("refused")):
+        result = si.identify_url("https://unreachable.example.com")
+    assert result.identified_type is None
+    assert result.error == "unreachable"
+
+
+def test_full_pipeline_detects_doc_page():
+    si = ServiceIdentifier()
+    # Override keywords so the test does not depend on service_profiles.json contents
+    si._api_doc_keywords = ["swagger-ui"]
+    doc_body = "<html><body><div class='swagger-ui'>API Documentation</div></body></html>"
+    mock_resp = _make_response(200, "text/html", doc_body)
+
+    with patch.object(si._session, "get", return_value=mock_resp):
+        result = si.identify_url("https://example.com/docs")
+
+    assert result.identified_type is None
+    assert result.note is not None
+    assert "documentation" in result.note.lower()
+
+
+def test_full_pipeline_detects_decommissioned():
+    si = ServiceIdentifier()
+    # Override keywords so the test does not depend on service_profiles.json contents
+    si._decommissioned_keywords = ["decommissioned"]
+    decomm_body = "<html><body>This service has been decommissioned.</body></html>"
+    mock_resp = _make_response(200, "text/html", decomm_body)
+
+    with patch.object(si._session, "get", return_value=mock_resp):
+        result = si.identify_url("https://example.com/old")
+
+    assert result.identified_type is None
+    assert result.note is not None
+    assert "decommission" in result.note.lower()
