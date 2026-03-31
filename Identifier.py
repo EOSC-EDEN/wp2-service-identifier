@@ -3,6 +3,7 @@ wp2-service-identifier — core identification engine.
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -50,6 +51,7 @@ DEFAULT_MAX_RUNNERS_UP = 3
 DEFAULT_LOW_THRESHOLD = 1.0   # minimum score to shortlist for targeted probes
 DEFAULT_MAX_THREADS = 10
 DEFAULT_REQUEST_TIMEOUT = 15  # seconds per HTTP request
+FFIS_PROBE_BYTES = 8192        # leading bytes sent to FFIS for format identification
 
 
 class ServiceIdentifier:
@@ -72,6 +74,7 @@ class ServiceIdentifier:
         low_threshold: float = DEFAULT_LOW_THRESHOLD,
         max_threads: int = DEFAULT_MAX_THREADS,
         request_timeout: int = DEFAULT_REQUEST_TIMEOUT,
+        ffis_url: Optional[str] = None,
     ):
         self.min_confidence = min_confidence
         self.ambiguity_gap = ambiguity_gap
@@ -79,6 +82,8 @@ class ServiceIdentifier:
         self.low_threshold = low_threshold
         self.max_threads = max_threads
         self.request_timeout = request_timeout
+        # Optional FFIS integration — falls back to FFIS_URL env var if not passed explicitly
+        self.ffis_url = (ffis_url or os.environ.get("FFIS_URL", "")).rstrip("/")
 
         with open(profiles_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
@@ -141,15 +146,18 @@ class ServiceIdentifier:
             return IdentificationResult(url=url, identified_type=None,
                                         note="Documentation page detected, not a live service endpoint")
 
+        # Optional FFIS format check — one call on the initial response, result threaded through scoring
+        ffis_mime = self._query_ffis(initial_response.content)
+
         # Stage 3 — shortlist: score initial response against all candidates
-        shortlist = self._score_against_candidates(initial_response, candidates)
+        shortlist = self._score_against_candidates(initial_response, candidates, ffis_mime=ffis_mime)
 
         if not shortlist:
             return IdentificationResult(url=url, identified_type=None,
                                         note="No profile scored above threshold on initial probe")
 
         # Stage 4 — targeted probes (parallel)
-        final_scores = self._run_targeted_probes(url, shortlist)
+        final_scores = self._run_targeted_probes(url, shortlist, ffis_mime=ffis_mime)
 
         # Determine winning probe URL (suffix used for the best-scoring profile)
         winning_probe_url = None
@@ -185,6 +193,33 @@ class ServiceIdentifier:
     def _is_doc_page(self, body_lower: str) -> bool:
         return any(kw.lower() in body_lower for kw in self._api_doc_keywords)
 
+    def _query_ffis(self, content: bytes) -> Optional[str]:
+        """POST the leading bytes of a response to FFIS and return the detected MIME type.
+
+        Returns the MIME type string on success, or None if FFIS is not configured,
+        unreachable, or returns no usable result. Never raises.
+        """
+        if not self.ffis_url:
+            return None
+        try:
+            resp = self._session.post(
+                f"{self.ffis_url}/identify",
+                files={"file": ("response.bin", io.BytesIO(content[:FFIS_PROBE_BYTES]))},
+                timeout=self.request_timeout,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                for identifier in data.get("identifiers", []):
+                    if identifier.get("scheme", "").upper() == "MIME":
+                        mime = identifier.get("value")
+                        logger.info("FFIS identified format: %s (basis: %s)", mime, data.get("basis", "unknown"))
+                        return mime
+            else:
+                logger.debug("FFIS returned non-200 status: %s", resp.status_code)
+        except Exception as e:
+            logger.debug("FFIS query failed (non-fatal): %s", e)
+        return None
+
     def _probe(self, url: str, suffix: Optional[str], method: str = "GET") -> Optional[requests.Response]:
         """Fire a single HTTP request using the shared session. Returns Response or None on error."""
         target = url + suffix if suffix else url
@@ -202,7 +237,8 @@ class ServiceIdentifier:
             return None
 
     def _score_response(
-        self, response: requests.Response, profile_key: str
+        self, response: requests.Response, profile_key: str,
+        ffis_mime: Optional[str] = None,
     ) -> tuple[float, bool, list[str]]:
         """Score a response against a single profile.
 
@@ -212,6 +248,7 @@ class ServiceIdentifier:
           2 pts — Content-Type matches profile's expected MIME
           3 pts — Body signatures matched (partial credit: hits/total × 3)
           2 pts — Spec URL found in body resolves to this profile
+          1 pt  — FFIS independently confirms the MIME type (optional bonus)
         """
         profile = self.profiles.get(profile_key, {})
         if not profile:
@@ -260,10 +297,15 @@ class ServiceIdentifier:
                     score += 2.0
                     break
 
+        # 1 pt — FFIS independently confirms the MIME type for this profile
+        if ffis_mime and expected_mimes and ffis_mime.lower() in expected_mimes:
+            score += 1.0
+
         return round(min(score, 10.0), 2), matched_mime, matched_sigs
 
     def _score_against_candidates(
-        self, response: requests.Response, candidates: list[str]
+        self, response: requests.Response, candidates: list[str],
+        ffis_mime: Optional[str] = None,
     ) -> list[tuple[str, float, bool, list[str]]]:
         """Score initial response against all candidate profiles.
 
@@ -272,14 +314,15 @@ class ServiceIdentifier:
         """
         results = []
         for key in candidates:
-            score, matched_mime, matched_sigs = self._score_response(response, key)
+            score, matched_mime, matched_sigs = self._score_response(response, key, ffis_mime=ffis_mime)
             if score >= self.low_threshold:
                 results.append((key, score, matched_mime, matched_sigs))
         results.sort(key=lambda x: x[1], reverse=True)
         return results
 
     def _probe_one_profile(
-        self, url: str, profile_key: str
+        self, url: str, profile_key: str,
+        ffis_mime: Optional[str] = None,
     ) -> tuple[str, float, bool, list[str]]:
         """Fire targeted probe for one profile. Returns (key, score, matched_mime, matched_sigs).
 
@@ -297,13 +340,14 @@ class ServiceIdentifier:
             logger.debug("Targeted probe failed for profile %s, scoring 0.0", profile_key)
             return profile_key, 0.0, False, []
 
-        score, matched_mime, matched_sigs = self._score_response(resp, profile_key)
+        score, matched_mime, matched_sigs = self._score_response(resp, profile_key, ffis_mime=ffis_mime)
         return profile_key, score, matched_mime, matched_sigs
 
     def _run_targeted_probes(
         self,
         url: str,
         shortlist: list[tuple[str, float, bool, list[str]]],
+        ffis_mime: Optional[str] = None,
     ) -> list[tuple[str, float, bool, list[str]]]:
         """Run targeted probes for all shortlisted profiles in parallel.
 
@@ -315,7 +359,7 @@ class ServiceIdentifier:
 
         with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
             for key, _, _, _ in shortlist:
-                future = executor.submit(self._probe_one_profile, url, key)
+                future = executor.submit(self._probe_one_profile, url, key, ffis_mime)
                 futures[future] = key
 
             for future in as_completed(futures):

@@ -18,6 +18,7 @@ Options:
 - `--ambiguity-gap FLOAT` — score gap below which result is flagged ambiguous (default: 1.0)
 - `--max-runners-up INT` — number of runner-up candidates in output (default: 3)
 - `--threads INT` — max parallel probe threads (default: 10)
+- `--verbose` / `-v` — print INFO log messages (e.g. FFIS queries)
 
 ### Web API
 
@@ -46,6 +47,21 @@ python batch_identifier.py --fuseki http://localhost:3030/service_registry_store
 ```
 
 Environment variables for auth: `FUSEKI_USERNAME`, `FUSEKI_PASSWORD`
+
+## FFIS Integration (Optional)
+
+The identifier can optionally query the [EOSC File Format Identification Service (FFIS)](https://ffis.fd-dev.csc.fi/)
+to independently verify the format of a probed response. A confirmed MIME type adds +1 to the profile's confidence score.
+
+Set the `FFIS_URL` environment variable (or add it to `.env`) to enable:
+
+```bash
+FFIS_URL=https://ffis.fd-dev.csc.fi
+```
+
+The identifier sends the first 8 KB of the response body to FFIS — sufficient for text-based formats
+(XML, JSON, HTML) which make up the vast majority of API responses. If FFIS is unreachable or returns
+no result the identification proceeds normally with no score change.
 
 ## How It Works
 

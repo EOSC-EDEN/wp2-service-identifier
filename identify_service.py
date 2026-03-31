@@ -9,7 +9,11 @@ Usage:
 import argparse
 import dataclasses
 import json
+import logging
 import sys
+
+from dotenv import load_dotenv
+load_dotenv()
 
 from Identifier import ServiceIdentifier
 
@@ -27,7 +31,12 @@ def main():
                         help="Maximum number of runner-up candidates to return (default: 3)")
     parser.add_argument("--threads", type=int, default=10,
                         help="Max parallel probe threads (default: 10)")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Show INFO log messages (e.g. FFIS queries)")
     args = parser.parse_args()
+
+    if args.verbose:
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     url = args.url
     if not url:
