@@ -124,11 +124,13 @@ pip install -r requirements.txt
 
 ## Updating Service Profiles
 
-`service_profiles.json` is a local copy from the service-validator. To update:
-
-```bash
-cp ../service-validator/service_profiles.json service_profiles.json
-```
+> **⚠️ `service_profiles.json` is a synced copy — do not edit it here.**
+> The single authoritative copy lives in
+> **[weiserjens/service-profiles](https://github.com/weiserjens/service-profiles.git)**
+> and is synced automatically into this repo (and the service-validator repo)
+> via the `sync/service-profiles` branch. Local edits will be **overwritten**
+> on the next sync. To change a profile, edit it in the authoritative source
+> repo.
 
 ## Running Tests
 
