@@ -38,6 +38,7 @@ class IdentificationResult:
     probed_url: Optional[str] = None   # URL used for the winning targeted probe
     status_code: Optional[int] = None
     content_type: Optional[str] = None
+    ffis_detected_format: Optional[str] = None  # externally-detected format (provenance only, never scored)
     error: Optional[str] = None
     note: Optional[str] = None
 
@@ -146,18 +147,20 @@ class ServiceIdentifier:
             return IdentificationResult(url=url, identified_type=None,
                                         note="Documentation page detected, not a live service endpoint")
 
-        # Optional FFIS format check — one call on the initial response, result threaded through scoring
+        # Optional FFIS format cross-check — one call on the initial response.
+        # Provenance only: recorded on the result, never contributes to scoring (STIS-REQ-3-07).
         ffis_mime = self._query_ffis(initial_response.content)
 
         # Stage 3 — shortlist: score initial response against all candidates
-        shortlist = self._score_against_candidates(initial_response, candidates, ffis_mime=ffis_mime)
+        shortlist = self._score_against_candidates(initial_response, candidates)
 
         if not shortlist:
             return IdentificationResult(url=url, identified_type=None,
+                                        ffis_detected_format=ffis_mime,
                                         note="No profile scored above threshold on initial probe")
 
         # Stage 4 — targeted probes (parallel)
-        final_scores = self._run_targeted_probes(url, shortlist, ffis_mime=ffis_mime)
+        final_scores = self._run_targeted_probes(url, shortlist)
 
         # Determine winning probe URL (suffix used for the best-scoring profile)
         winning_probe_url = None
@@ -170,11 +173,13 @@ class ServiceIdentifier:
                 winning_probe_url = url + suffix
 
         # Stage 5 — rank and emit
-        return self._rank_and_emit(
+        result = self._rank_and_emit(
             url, final_scores,
             initial_response=initial_response,
             winning_probe_url=winning_probe_url,
         )
+        result.ffis_detected_format = ffis_mime
+        return result
 
     def _prefilter_by_url_pattern(self, url: str) -> list[str]:
         """Return list of profile keys to probe. Returns all supported profiles.
@@ -238,7 +243,6 @@ class ServiceIdentifier:
 
     def _score_response(
         self, response: requests.Response, profile_key: str,
-        ffis_mime: Optional[str] = None,
     ) -> tuple[float, bool, list[str]]:
         """Score a response against a single profile.
 
@@ -248,7 +252,9 @@ class ServiceIdentifier:
           2 pts — Content-Type matches profile's expected MIME
           3 pts — Body signatures matched (partial credit: hits/total × 3)
           2 pts — Spec URL found in body resolves to this profile
-          1 pt  — FFIS independently confirms the MIME type (optional bonus)
+
+        Note: the optional FFIS format cross-check does NOT contribute to the score
+        (see STIS-REQ-3-07); it is recorded on the result as provenance only.
         """
         profile = self.profiles.get(profile_key, {})
         if not profile:
@@ -297,15 +303,10 @@ class ServiceIdentifier:
                     score += 2.0
                     break
 
-        # 1 pt — FFIS independently confirms the MIME type for this profile
-        if ffis_mime and expected_mimes and ffis_mime.lower() in expected_mimes:
-            score += 1.0
-
         return round(min(score, 10.0), 2), matched_mime, matched_sigs
 
     def _score_against_candidates(
         self, response: requests.Response, candidates: list[str],
-        ffis_mime: Optional[str] = None,
     ) -> list[tuple[str, float, bool, list[str]]]:
         """Score initial response against all candidate profiles.
 
@@ -314,7 +315,7 @@ class ServiceIdentifier:
         """
         results = []
         for key in candidates:
-            score, matched_mime, matched_sigs = self._score_response(response, key, ffis_mime=ffis_mime)
+            score, matched_mime, matched_sigs = self._score_response(response, key)
             if score >= self.low_threshold:
                 results.append((key, score, matched_mime, matched_sigs))
         results.sort(key=lambda x: x[1], reverse=True)
@@ -322,7 +323,6 @@ class ServiceIdentifier:
 
     def _probe_one_profile(
         self, url: str, profile_key: str,
-        ffis_mime: Optional[str] = None,
     ) -> tuple[str, float, bool, list[str]]:
         """Fire targeted probe for one profile. Returns (key, score, matched_mime, matched_sigs).
 
@@ -340,14 +340,13 @@ class ServiceIdentifier:
             logger.debug("Targeted probe failed for profile %s, scoring 0.0", profile_key)
             return profile_key, 0.0, False, []
 
-        score, matched_mime, matched_sigs = self._score_response(resp, profile_key, ffis_mime=ffis_mime)
+        score, matched_mime, matched_sigs = self._score_response(resp, profile_key)
         return profile_key, score, matched_mime, matched_sigs
 
     def _run_targeted_probes(
         self,
         url: str,
         shortlist: list[tuple[str, float, bool, list[str]]],
-        ffis_mime: Optional[str] = None,
     ) -> list[tuple[str, float, bool, list[str]]]:
         """Run targeted probes for all shortlisted profiles in parallel.
 
@@ -359,7 +358,7 @@ class ServiceIdentifier:
 
         with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
             for key, _, _, _ in shortlist:
-                future = executor.submit(self._probe_one_profile, url, key, ffis_mime)
+                future = executor.submit(self._probe_one_profile, url, key)
                 futures[future] = key
 
             for future in as_completed(futures):

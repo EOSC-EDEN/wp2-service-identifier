@@ -4,6 +4,8 @@
 **Date:** 2026-03-16
 **Status:** Proposed specification for the EOSC EDEN architecture, open for review by EDEN technical working groups.
 
+This specification describes the **target conformant service** — the behaviour any conforming implementation is expected to provide — rather than the current state of any single reference implementation. Normative requirements may therefore be written ahead of existing code. Known gaps between this specification and the `wp2-service-identifier` reference implementation are listed in the [Implementation Status](#implementation-status) section.
+
 ## Abstract
 
 This specification defines the functional and technical requirements for a Service Type Identification Service (STIS) within the EOSC EDEN ecosystem. The STIS is responsible for determining the protocol type and capability profile of an unknown endpoint by issuing structured HTTP probes and scoring responses against a curated registry of known service profiles. By identifying endpoints as specific service types (e.g., OAI-PMH, SPARQL, OGC-WMS), this service enables automated harvesting pipelines, interoperability assessments, and service registry population tasks to proceed without prior knowledge of what protocol an endpoint speaks.
@@ -66,7 +68,7 @@ The table below maps the STIS's relationships to specific CPPs. The Scope column
 | Prerequisite for | CPP-029 Ingest | Ingest | WP2 pipeline | In the EOSC EDEN harvesting pipeline, ingest must select the correct protocol adapter (OAI-PMH, SPARQL, OGC, etc.) before a SIP can be submitted; the STIS provides the protocol classification needed for that routing decision. |
 | Produces input for | CPP-024 Enabling Discovery | Data Management | WP2 pipeline | The STIS output — service type, confidence, and provenance — constitutes the machine-actionable metadata record needed to populate a service endpoint catalogue or registry of the kind that CPP-024-compliant discovery processes can query. |
 | Produces input for | CPP-016 Metadata Ingest and Management | Data Management | WP1 framework + WP2 pipeline | The identification result (service type, confidence, ambiguity flag, resolved URL, HTTP status, content-type) maps directly to *Technical metadata* and *Provenance metadata* as defined in CPP-016; this metadata about the service endpoint must itself be ingested and managed. |
-| Conceptual analogue | CPP-008 File Format Identification | Administration | WP1 framework (analogue, not dependency) | The STIS performs for service endpoints what CPP-008 performs for files: both identify the "type" of an artifact using signatures and scoring, producing Technical and Provenance metadata that unlocks downstream preservation actions. The STIS is not a TDA-internal process, but the structural parallel is intentional and directly informs the STIS's scoring model and evidence design. |
+| Analogue &amp; consumer of | CPP-008 File Format Identification | Administration | WP1 framework (analogue + optional runtime dependency) | The STIS performs for service endpoints what CPP-008 performs for files: both identify the "type" of an artifact using signatures and scoring, producing Technical and Provenance metadata that unlocks downstream preservation actions. Beyond the structural parallel, the STIS MAY *consume* a running CPP-008-style service at runtime: it can submit a sample of a probe response to an external File Format Identification Service (FFIS) as an independent cross-check (see STIS-REQ-3-07). This is a concrete demonstration of composition between EDEN services, though the STIS itself remains outside the TDA boundary. |
 
 ### Inputs and Outputs
 
@@ -83,6 +85,7 @@ The table below maps the STIS's relationships to specific CPPs. The Scope column
     * The probed URL used for the winning candidate (including any appended query parameters)
     * HTTP status code of the winning probe response
     * Content-Type of the winning probe response
+    * The externally-detected format, if an optional file-format identification cross-check was performed (see STIS-REQ-3-07) — recorded as evidence only, never affecting the confidence score
     * Any error or informational note (e.g., connection timeout, HTML documentation page detected)
 * **Runner-up candidates:** A ranked list of alternative matches, each with service type, score, and matched evidence (MIME type match, body signatures matched)
 
@@ -143,11 +146,12 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 * **{{ STIS-REQ-3-04 }}** The Service MUST detect and report ambiguous results. A result is ambiguous when the score difference between the top-ranked and second-ranked candidates is less than or equal to a configurable ambiguity gap. Ambiguous results MUST be clearly flagged in the output and MUST NOT be treated as definitive identifications without further investigation.
 * **{{ STIS-REQ-3-05 }}** Confidence scores MUST be bounded to a defined maximum value (e.g., 10.0). The score ceiling MUST be documented.
 * **{{ STIS-REQ-3-06 }}** The shortlisting stage MUST apply a configurable low threshold to filter out clearly non-matching profiles before targeted probing. Only profiles meeting the low threshold SHOULD proceed to targeted probing, to avoid unnecessary network requests.
+* **{{ STIS-REQ-3-07 }}** The Service MAY perform an independent format cross-check by submitting a sample of a probe response to an external file-format identification service (e.g., the EOSC File Format Identification Service, FFIS). Where such a cross-check is performed, the externally-detected format MUST be recorded in the output as provenance and MUST NOT contribute to the confidence score. The cross-check serves two purposes: robustness against endpoints that return an incorrect or generic `Content-Type` header, and demonstration of runtime composition between EDEN services. The Service MUST proceed normally, without penalty, when the external service is unconfigured or unreachable.
 
 ### Requirement Group 4 – Reporting and Output
 
 * **{{ STIS-REQ-4-01 }}** The Service MUST produce machine-actionable output in a structured format (e.g., JSON). The output MUST be parseable without additional transformation by downstream automated workflows.
-* **{{ STIS-REQ-4-02 }}** The output MUST include all fields described in the "Core Preservation Processes" section: identified service type, confidence score, ambiguity flag, resolved URL, redirect flag, probed URL, HTTP status code, content-type, runner-up candidates, and outcome/error information.
+* **{{ STIS-REQ-4-02 }}** The output MUST include all fields described in the "Core Preservation Processes" section: identified service type, confidence score, ambiguity flag, resolved URL, redirect flag, probed URL, HTTP status code, content-type, runner-up candidates, and outcome/error information. Where an optional external format cross-check (STIS-REQ-3-07) was performed, the output MUST also include the externally-detected format.
 * **{{ STIS-REQ-4-03 }}** Runner-up candidate entries in the output MUST include, at minimum: service type identifier, score, whether the MIME type matched, and which body signatures were matched. This evidence MUST be sufficient for a human or downstream system to understand why a candidate was ranked.
 * **{{ STIS-REQ-4-04 }}** The output MUST distinguish between the following outcome states: successful unambiguous match, ambiguous match, no match, and error (unreachable endpoint, unsupported scheme, connection failure). Each state MUST be representable in the structured output.
 * **{{ STIS-REQ-4-05 }}** The number of runner-up candidates included in the output SHOULD be configurable by the caller.
@@ -197,6 +201,14 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 * **Body signature design:** Profile body signatures should be chosen to be highly discriminating. Signatures that appear in responses of many different service types (e.g., generic XML declarations) should be avoided or assigned low weight. Prefer strings or patterns that are normatively part of the service protocol (e.g., XML namespace URIs, protocol-specific element names).
 * **Score ceiling:** Clamping scores to 10.0 ensures that an accumulation of partial credits from multiple signals cannot falsely elevate a weak candidate above a true match.
 
+### External Format Cross-Check and Service Composition
+
+The optional external format cross-check (STIS-REQ-3-07) is deliberately kept *out* of the scoring model. The rationale:
+
+* **It is a weak classification signal.** The STIS classifies protocols, but probe responses are almost always XML, JSON, or HTML. Confirming that a response "is XML" does not distinguish OAI-PMH from OGC-WMS, ATOM, or SOAP — they are all XML — and the format family is already available from the `Content-Type` header. Letting such a signal contribute points would reward format-family agreement rather than protocol identity.
+* **Its real value is elsewhere.** First, *robustness*: an endpoint that returns a real XML body under a wrong or generic `Content-Type` (e.g. `text/plain`, `application/octet-stream`) can still be recognised, because a byte-level format identifier sniffs the content rather than trusting the header. Second, *interoperability demonstration*: invoking an external File Format Identification Service (FFIS) is a concrete, working example of two EDEN services composing, and directly instantiates the CPP-008 relationship described in the Core Preservation Processes section.
+* **Recommended handling.** Treat the externally-detected format as a provenance annotation on the result (e.g. an `ffis_detected_format` field). Report it for transparency and downstream use, but never let it move a candidate's rank. When the external service is unconfigured or unreachable, identification proceeds unchanged.
+
 ### Profile Registry Management
 
 * **Registry as single source of truth:** The profile registry (e.g., `service_profiles.json`) should be the single configuration artefact that defines what service types are recognizable and how they are detected. The identification engine should be generic over the registry; adding a new service type should require only a new profile entry, not code changes.
@@ -207,7 +219,7 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 
 * **Ambiguous results:** When the top two candidates score within the ambiguity gap, the result should be flagged as ambiguous and both candidates reported with their evidence. The recommended default gap is 1.0 out of 10.0. Downstream systems should treat ambiguous results as requiring human review or additional disambiguation probes rather than as definitive classifications.
 * **No-match results:** If no candidate exceeds the minimum confidence threshold (recommended default: 3.0 out of 10.0), the service should return a `null` identification result with the full runner-up list (if any candidates scored above the low threshold). This supports debugging and manual classification.
-* **HTML documentation page detection:** Many inactive or decommissioned endpoints return HTML documentation pages at their root URL. The initial probe stage should detect this condition (e.g., by checking `Content-Type: text/html` combined with the absence of any service-indicative signatures) and return an informational note rather than scoring against service profiles.
+* **HTML documentation page detection:** Many inactive or decommissioned endpoints return HTML documentation pages at their root URL. The initial probe stage should detect this condition and return an informational note rather than scoring against service profiles. A simple and effective approach is to match the response body against a configurable list of documentation- and decommissioning-related keywords. A more robust refinement is to additionally require the *absence* of any service-indicative signature before classifying a `text/html` response as a documentation page, which reduces the chance of misclassifying a live service that happens to serve HTML.
 
 ### Batch Processing Considerations
 
@@ -244,6 +256,7 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
   "probed_url": "https://example.org/oai?verb=Identify",
   "status_code": 200,
   "content_type": "text/xml;charset=UTF-8",
+  "ffis_detected_format": "application/xml",
   "error": null,
   "note": null
 }
@@ -269,6 +282,7 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
   "probed_url": "https://example.org/data?query=SELECT+%2A+WHERE+%7B%7D+LIMIT+1",
   "status_code": 200,
   "content_type": "application/json",
+  "ffis_detected_format": "application/json",
   "error": null,
   "note": "Ambiguous: top two candidates within 0.5 of each other"
 }
@@ -279,18 +293,28 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 {
   "url": "https://example.org/unknown",
   "identified_type": null,
-  "confidence": null,
+  "confidence": 1.8,
   "ambiguous": false,
-  "runners_up": [],
+  "runners_up": [
+    {
+      "service_type": "REST",
+      "score": 1.8,
+      "matched_mime": false,
+      "matched_body_signatures": []
+    }
+  ],
   "final_url": "https://example.org/unknown",
   "had_redirect": false,
   "probed_url": "https://example.org/unknown",
   "status_code": 200,
   "content_type": "text/html",
+  "ffis_detected_format": null,
   "error": null,
-  "note": "No candidate exceeded minimum confidence threshold of 3.0"
+  "note": "No profile matched with sufficient confidence (best: REST @ 1.8)"
 }
 ```
+
+> **Note on `confidence` in no-match results.** When at least one candidate scored but none reached the minimum confidence threshold, `confidence` carries the numeric best score (as above), and that best candidate appears in `runners_up` — this supports debugging and manual classification. `confidence` is `null` only when *no* candidate scored at all, or for non-scoring outcomes (unreachable endpoint, decommissioned/documentation page, unsupported scheme).
 
 **Error (unreachable endpoint):**
 ```json
@@ -305,6 +329,7 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
   "probed_url": null,
   "status_code": null,
   "content_type": null,
+  "ffis_detected_format": null,
   "error": "ConnectionError: Failed to establish connection",
   "note": null
 }
@@ -333,11 +358,27 @@ Addressed by: STIS-REQ-1-01 (blind protocol identification), STIS-REQ-2-01 (prof
 *TDAs must provide clear, persistent, and accessible documentation describing their services and protocols, both in human-readable and machine-readable forms.*
 The STIS produces the machine-readable service type evidence that can be used to populate or validate the protocol documentation associated with a TDA in EOSC registries and knowledge graphs.
 Addressed by: STIS-REQ-4-01 (machine-actionable JSON output), STIS-REQ-4-02 (provenance fields enabling reproducible documentation), STIS-REQ-5-06 (machine-readable OpenAPI schema for the service itself)
+> *Note: classified as a Non-functional requirement in the T2.1 source.*
 
 ### DISCIPLINE-SPECIFIC-REQ-024 (Mandatory)
 *As a researcher that produce and consume research data, I require machine readable / API access to dataset, for efficient data management.*
 Identifying the service type of an endpoint is a prerequisite for selecting the correct API access pattern (e.g., OAI-PMH `ListRecords`, SPARQL `SELECT`, OGC `GetCapabilities`).
 Addressed by: STIS-REQ-1-01 (service type identification enabling correct API selection), STIS-REQ-5-01 (REST API for programmatic access), STIS-REQ-5-02 (CLI for scripted workflows)
+> *Note: this is a WP3 user story; its T2.1 CPP mapping (CPP-025 Access, CPP-024 Discovery) reinforces the STIS's discovery/access dependency claims in the Core Preservation Processes section.*
+
+## Implementation Status
+
+This specification describes the target conformant service (see **Status**, above). The reference
+implementation (`wp2-service-identifier`) does not yet satisfy every normative requirement. The known
+conformance gaps at the time of writing are:
+
+| Requirement | Gap in reference implementation |
+|---|---|
+| STIS-REQ-6-02 (SSRF / input sanitization) | Caller-supplied URLs are not yet validated or sanitized before an outbound probe is issued. |
+| STIS-REQ-6-06 (no redirects to private ranges) | Redirects are followed unconditionally; private/loopback address ranges are not blocked. |
+| STIS-REQ-1-05 (documentation-page detection) | Detection currently relies on keyword matching against a configurable list, rather than on the absence of service-indicative signatures described in the non-normative guidance. |
+
+These gaps are tracked as implementation backlog items, not as deficiencies in this specification.
 
 ## References
 
