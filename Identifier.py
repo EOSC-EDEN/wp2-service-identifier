@@ -11,11 +11,20 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Optional
-from urllib.parse import urlparse, urljoin
+from urllib.parse import quote, urlparse, urljoin
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+# {search_term_string} or its percent-encoded form, as found in schema.org SearchAction targets.
+_URL_PLACEHOLDER = re.compile(r"(?:\{|%7B)\w+(?:\}|%7D)", re.IGNORECASE)
+
+
+def _has_keyword(body_lower: str, keywords: list[str]) -> bool:
+    # Alphanumeric boundaries: 'curl' must not fire inside a base64 image, nor 'raml' inside 'paramlist'.
+    return any(re.search(r"(?<![a-z0-9])" + re.escape(kw.lower()) + r"(?![a-z0-9])", body_lower)
+               for kw in keywords)
 
 
 @dataclass
@@ -139,13 +148,17 @@ class ServiceIdentifier:
         body_text = (initial_response.text or "")[:50000]
         body_lower = body_text.lower()
 
+        html_note = None
         if self._is_decommissioned(body_lower):
-            return IdentificationResult(url=url, identified_type=None,
-                                        note="Decommissioned or migrated service detected")
-
-        if self._is_doc_page(body_lower):
-            return IdentificationResult(url=url, identified_type=None,
-                                        note="Documentation page detected, not a live service endpoint")
+            html_note = "Decommissioned or migrated service detected"
+        elif self._is_doc_page(body_lower):
+            html_note = "Documentation page detected, not a live service endpoint"
+        if html_note:
+            # Profiles whose responses are arbitrary content (search results) ignore keyword hits.
+            candidates = [key for key in candidates
+                          if self.profiles[key].get("special", {}).get("skip_html_keyword_checks")]
+            if not candidates:
+                return IdentificationResult(url=url, identified_type=None, note=html_note)
 
         # Optional FFIS format cross-check — one call on the initial response.
         # Provenance only: recorded on the result, never contributes to scoring (STIS-REQ-3-07).
@@ -167,10 +180,9 @@ class ServiceIdentifier:
         if final_scores:
             sorted_finals = sorted(final_scores, key=lambda x: x[1], reverse=True)
             best_key = sorted_finals[0][0]
-            best_profile = self.profiles.get(best_key, {})
-            suffix = best_profile.get("probe", {}).get("suffix")
-            if suffix:
-                winning_probe_url = url + suffix
+            target = self._probe_target(url, self.profiles.get(best_key, {}))
+            if target != url:
+                winning_probe_url = target
 
         # Stage 5 — rank and emit
         result = self._rank_and_emit(
@@ -182,21 +194,36 @@ class ServiceIdentifier:
         return result
 
     def _prefilter_by_url_pattern(self, url: str) -> list[str]:
-        """Return list of profile keys to probe. Returns all supported profiles.
+        """Return list of profile keys to probe.
 
         This is the extension point for future URL-pattern-based narrowing.
         Profiles marked 'unsupported' (AMQP stub, MQTT stub, etc.) are excluded.
+        A URL template (placeholder in the URL) is only matched against profiles with
+        probe.template_value, and a plain URL never is: otherwise any HTML page that
+        happens to contain the template value would score as SearchAction.
         """
+        templated = bool(_URL_PLACEHOLDER.search(url))
         return [
             key for key, profile in self.profiles.items()
             if not profile.get("special", {}).get("unsupported", False)
+            and bool(profile.get("probe", {}).get("template_value")) == templated
         ]
 
+    @staticmethod
+    def _probe_target(url: str, profile: dict) -> str:
+        """The URL a profile's targeted probe actually requests."""
+        probe_cfg = profile.get("probe", {})
+        template_value = probe_cfg.get("template_value")
+        if template_value:
+            url = _URL_PLACEHOLDER.sub(quote(template_value, safe=""), url)
+        suffix = probe_cfg.get("suffix")
+        return url + suffix if suffix else url
+
     def _is_decommissioned(self, body_lower: str) -> bool:
-        return any(kw.lower() in body_lower for kw in self._decommissioned_keywords)
+        return _has_keyword(body_lower, self._decommissioned_keywords)
 
     def _is_doc_page(self, body_lower: str) -> bool:
-        return any(kw.lower() in body_lower for kw in self._api_doc_keywords)
+        return _has_keyword(body_lower, self._api_doc_keywords)
 
     def _query_ffis(self, content: bytes) -> Optional[str]:
         """POST the leading bytes of a response to FFIS and return the detected MIME type.
@@ -330,11 +357,9 @@ class ServiceIdentifier:
         This prevents a timed-out probe from being promoted by the initial score.
         """
         profile = self.profiles.get(profile_key, {})
-        probe_cfg = profile.get("probe", {})
-        suffix = probe_cfg.get("suffix", None)
-        method = probe_cfg.get("method") or "GET"
+        method = profile.get("probe", {}).get("method") or "GET"
 
-        resp = self._probe(url, suffix=suffix, method=method)
+        resp = self._probe(self._probe_target(url, profile), suffix=None, method=method)
         if resp is None:
             # Probe failed — score 0.0 rather than inheriting the shortlist score
             logger.debug("Targeted probe failed for profile %s, scoring 0.0", profile_key)
